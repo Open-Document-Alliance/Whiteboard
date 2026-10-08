@@ -9,9 +9,11 @@
 - The running preview serves the intended Whiteboard HTML, its font assets, and `/health`. `scripts/smoke-preview.ts` reads the bundled MCP resource and creates each sample through the actual HTTP MCP endpoint.
 - The current client HTML is approximately 8.5 MB uncompressed and 2.7 MB gzipped at build time. This is a bundle-size observation, not a measured cold-load latency.
 
+- A claimed browser tab loaded the standalone preview and created the flowchart example through the UI. The canvas rendered the diagram and displayed `Saved · v1`. This does not establish laptop-to-mini forwarding or ChatGPT-host acceptance.
+
 ## Not verified
 
-- Real browser interaction, keyboard/mobile behavior, and downloads. Browser tab claiming was available, but the runtime blocked the internal browser-identity page used to confirm which extension instance was Helium. No browser protection was bypassed.
+- Full browser interaction coverage, editing, keyboard/mobile behavior, and downloads. The browser check above covers initial loading and example creation only.
 - Browser access through the Mac-to-mini preview forwarding.
 - Installation, rendering, fullscreen, download capability, or model behavior inside ChatGPT. The connector has not been hosted or installed there.
 - GitHub CI status is reported on the pull request separately; local checks alone do not establish CI success.
