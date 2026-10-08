@@ -23,7 +23,13 @@ if (process.argv.includes("--stdio")) {
   const http = createHttpApp(store, {
     distDir,
     publicOrigin,
-    previewOrigin: "http://127.0.0.1:3175",
+    previewOrigins: [
+      "http://127.0.0.1:3175",
+      ...(process.env.WHITEBOARD_PREVIEW_ORIGINS ?? "")
+        .split(",")
+        .map((origin) => origin.trim())
+        .filter(Boolean),
+    ],
   }).listen(port, "127.0.0.1", () =>
     console.log(`Whiteboard: http://127.0.0.1:${port}/ — MCP: /mcp`),
   );

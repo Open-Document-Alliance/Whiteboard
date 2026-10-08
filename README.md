@@ -22,6 +22,8 @@ Open **http://127.0.0.1:3174/**. The local preview calls the real MCP tools; it 
 - Override `PORT`, `PUBLIC_ORIGIN`, or `WHITEBOARD_DATA_DIR` through environment variables.
 - The HTTP server deliberately binds to loopback and validates Host and Origin headers.
 
+The preview accepts `localhost`, `127.0.0.1`, and `::1` on the configured ports. If a local preview proxy uses a different browser-facing port, set its exact origin before starting the server, for example `WHITEBOARD_PREVIEW_ORIGINS=http://localhost:55263 npm start`. Multiple origins can be comma-separated. Other ports and foreign origins remain blocked. Standalone font assets load from the same origin as the page; `PUBLIC_ORIGIN` supplies the asset origin for embedded MCP apps.
+
 For development, run `npm run dev` and `npm run dev:ui` in separate terminals after the first build. The Vite UI uses port 3175 and proxies MCP to 3174. Font assets are copied by the build.
 
 ## What works

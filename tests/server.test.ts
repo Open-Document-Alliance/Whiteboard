@@ -1,7 +1,7 @@
 import test, { type TestContext } from "node:test";
 import { request } from "node:http";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -131,10 +131,15 @@ test("concurrent writes cannot overwrite a saved revision", async (t) => {
 });
 test("HTTP MCP transport works and blocks foreign origins and hostnames", async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), "whiteboard-http-test-"));
-  const http = createHttpApp(new BoardStore(directory), options).listen(
-    0,
-    "127.0.0.1",
+  await writeFile(
+    path.join(directory, "index.html"),
+    "<script>window.EXCALIDRAW_ASSET_PATH = '__WHITEBOARD_ORIGIN__/';</script>",
   );
+  const http = createHttpApp(new BoardStore(directory), {
+    ...options,
+    distDir: directory,
+    previewOrigins: ["http://127.0.0.1:3175", "http://localhost:55263"],
+  }).listen(0, "127.0.0.1");
   await new Promise<void>((resolve) => http.on("listening", resolve));
   const address = http.address() as { port: number };
   const url = `http://127.0.0.1:${address.port}`;
@@ -145,19 +150,54 @@ test("HTTP MCP transport works and blocks foreign origins and hostnames", async 
     await rm(directory, { recursive: true, force: true });
   });
   assert.equal((await fetch(`${url}/health`)).status, 200);
-  assert.equal(
-    (
-      await fetch(`${url}/mcp`, {
-        method: "POST",
-        headers: {
-          Origin: "https://unrelated.example",
-          "Content-Type": "application/json",
-        },
-        body: "{}",
-      })
-    ).status,
-    403,
-  );
+  assert.match(await (await fetch(url)).text(), /EXCALIDRAW_ASSET_PATH = '\/'/);
+  for (const origin of [
+    "https://unrelated.example",
+    "null",
+    "http://localhost:55264",
+    "https://localhost:3174",
+    "http://localhost.evil.example:3174",
+    "http://127.0.0.2:3174",
+  ]) {
+    assert.equal(
+      (
+        await fetch(`${url}/mcp`, {
+          method: "POST",
+          headers: { Origin: origin, "Content-Type": "application/json" },
+          body: "{}",
+        })
+      ).status,
+      403,
+      origin,
+    );
+  }
+  for (const origin of [
+    "http://127.0.0.1:3174",
+    "http://localhost:3174",
+    "http://[::1]:3174",
+    "http://localhost:3175",
+    "http://localhost:55263",
+  ]) {
+    const browserClient = new Client({
+      name: "browser-origin-test",
+      version: "1",
+    });
+    try {
+      await browserClient.connect(
+        new StreamableHTTPClientTransport(new URL(`${url}/mcp`), {
+          requestInit: { headers: { Origin: origin } },
+        }),
+      );
+      assert.ok(
+        (await browserClient.listTools()).tools.some(
+          (tool) => tool.name === "create_diagram",
+        ),
+        origin,
+      );
+    } finally {
+      await browserClient.close();
+    }
+  }
   const foreignHost = await new Promise<number | undefined>(
     (resolve, reject) => {
       const req = request(

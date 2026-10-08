@@ -7,17 +7,30 @@ import type { BoardStore } from "./store.js";
 
 export function createHttpApp(
   store: BoardStore,
-  options: { distDir: string; publicOrigin: string; previewOrigin?: string },
+  options: { distDir: string; publicOrigin: string; previewOrigins?: string[] },
 ) {
+  const allowedOrigins = new Set<string>();
+  for (const value of [
+    options.publicOrigin,
+    ...(options.previewOrigins ?? []),
+  ]) {
+    const origin = new URL(value);
+    if (!["http:", "https:"].includes(origin.protocol))
+      throw new Error("Preview origins must use HTTP or HTTPS");
+    allowedOrigins.add(origin.origin);
+    if (["localhost", "127.0.0.1", "[::1]"].includes(origin.hostname)) {
+      for (const hostname of ["localhost", "127.0.0.1", "[::1]"]) {
+        origin.hostname = hostname;
+        allowedOrigins.add(origin.origin);
+      }
+    }
+  }
   const app = express();
   app.disable("x-powered-by");
   app.use(localhostHostValidation());
   app.use((req, res, next) => {
     const origin = req.get("origin");
-    if (
-      origin &&
-      ![options.publicOrigin, options.previewOrigin].includes(origin)
-    ) {
+    if (origin && !allowedOrigins.has(origin)) {
       res.status(403).json({ error: "Origin not allowed" });
       return;
     }
@@ -42,13 +55,11 @@ export function createHttpApp(
       await transport.handleRequest(req, res, req.body);
     } catch {
       if (!res.headersSent)
-        res
-          .status(500)
-          .json({
-            jsonrpc: "2.0",
-            id: null,
-            error: { code: -32603, message: "Whiteboard request failed" },
-          });
+        res.status(500).json({
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32603, message: "Whiteboard request failed" },
+        });
     }
   });
   app.get("/", async (_req, res, next) => {
@@ -59,7 +70,7 @@ export function createHttpApp(
         .send(
           (
             await readFile(path.join(options.distDir, "index.html"), "utf8")
-          ).replaceAll("__WHITEBOARD_ORIGIN__", options.publicOrigin),
+          ).replaceAll("__WHITEBOARD_ORIGIN__", ""),
         );
     } catch (error) {
       next(error);
