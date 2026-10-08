@@ -73,6 +73,12 @@ For development, run `npm run dev` and `npm run dev:ui` in separate terminals af
 
 Boards are persisted when tools create them. Manual edits autosave after a short pause; the standalone URL receives the board ID for reopening. ChatGPT should read the latest board before replacing a scene. A revision conflict leaves the user's draft on the canvas; download that draft before reloading and merging it with the current saved board.
 
+## Codex plugin source
+
+The local Codex plugin bundle is tracked in [`plugins/whiteboard`](plugins/whiteboard): its manifest, MCP connection, and drawing skill. It connects to the existing Whiteboard service at `http://127.0.0.1:3174/mcp`; build and run the server on the Codex host before using it. The plugin does not start or deploy the server itself.
+
+Register the bundle in your Codex marketplace to install it, then start a new chat to load its tools. The user-specific marketplace, installed cache, saved boards, runtime logs, and GitHub credentials are local state and are not included in the repository.
+
 ## Connect to ChatGPT
 
 The canvas follows the [OpenAI MCP Apps quickstart](https://developers.openai.com/plugins/build/app-quickstart) and the [MCP Apps standard](https://github.com/modelcontextprotocol/ext-apps). ChatGPT needs a reachable HTTPS MCP endpoint and a custom connection. A laptop's loopback preview is not such an endpoint.
