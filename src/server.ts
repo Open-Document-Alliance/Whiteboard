@@ -29,7 +29,7 @@ import {
 export const RESOURCE_URI = "ui://whiteboard/canvas-v1.html";
 export const GUIDE = `Whiteboard turns ideas into editable diagrams and visual stories.
 Choose create_diagram for flowcharts, architecture, relationships, and processes. Supply nodes and edges; automatic layout handles spacing and routing. Use 3–8 nodes per board where possible, short labels, and LR for a process or TB for a hierarchy.
-Choose create_story for explanations, journeys, timelines, before/after narratives. Use 2–8 steps, one idea per step: setup, change, consequence, takeaway. Users can step through frames and edit everything.
+Choose create_story for explanations, journeys, timelines, before/after narratives. Use 2–8 steps, one idea per step: setup, change, consequence, takeaway. Users can pan and edit everything on the native canvas.
 Choose create_view for custom visual compositions. It accepts a JSON array string of Excalidraw skeletons, following the excalidraw/excalidraw-mcp convention. Supported types: rectangle, ellipse, diamond, text, arrow, line, freedraw. Each needs unique id, type, x, y; shapes need width/height. Text needs text/fontSize. Lines need points [[dx,dy],...]. Labels: {text,fontSize:20,fontFamily:2}. Arrow connections: start:{id:'source'}, end:{id:'target'}, endArrowhead:'arrow'. Use backgroundColor, strokeColor, fillStyle:'solid', roughness:0.7. Camera pseudo-elements/checkpoints are not supported here; use optional named frames with elementIds instead.
 Example: [{"id":"idea","type":"rectangle","x":60,"y":80,"width":220,"height":100,"backgroundColor":"#e2eff5","label":{"text":"An idea","fontSize":20}}]
 Visual craft: establish a clear reading order, generous whitespace, dark readable text, 18–24px labels, and at most 3 semantic colors. Blue=input, green=outcome, amber=decision, rose=problem. Favor explanation over decoration. Never invent factual claims to fill a diagram.
@@ -155,7 +155,7 @@ export function createServer(
     {
       title: "Tell a visual story",
       description:
-        "Create an editable visual explanation with 2–8 numbered panels and presentation frames. Use for journeys, timelines, before/after narratives, and step-by-step storytelling.",
+        "Create an editable visual explanation with 2–8 numbered panels and named groups. Use for journeys, timelines, before/after narratives, and step-by-step storytelling.",
       inputSchema: storySchema,
       annotations: writeHints,
       _meta: ui,

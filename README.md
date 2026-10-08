@@ -29,7 +29,7 @@ For development, run `npm run dev` and `npm run dev:ui` in separate terminals af
 ## What works
 
 - **Automatic diagrams:** nodes and relationships become a graph with automatic spacing and routed arrows.
-- **Visual stories:** two to eight numbered panels with named frames and previous/next navigation.
+- **Visual stories:** two to eight numbered panels with named groups, editable on the native canvas.
 - **Custom drawing:** Excalidraw skeleton elements for compositions that need explicit placement; partial custom drawing input can render while the host streams it.
 - **Editing:** the native Excalidraw toolbar, undo/redo, frames, image insertion/paste/drop, and local file import. Changes autosave to the server with revision checks to prevent silent overwrites.
 - **Theme:** follows the system or MCP host; the native theme control also offers light, dark, and system.
