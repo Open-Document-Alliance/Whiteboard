@@ -15,6 +15,7 @@ export const elementSchema = z
       "line",
       "freedraw",
       "frame",
+      "image",
     ]),
     x: coordinate,
     y: coordinate,
@@ -35,7 +36,7 @@ export const elementSchema = z
     if (el.type === "text" && typeof el.text !== "string")
       ctx.addIssue({ code: "custom", message: "Text elements need text" });
     if (
-      ["arrow", "line", "freedraw", "frame"].includes(el.type) &&
+      ["arrow", "line", "freedraw"].includes(el.type) &&
       (!el.points || el.points.length < 2)
     )
       ctx.addIssue({
@@ -58,10 +59,37 @@ export const frameSchema = z.object({
 });
 export const framesSchema = z.array(frameSchema).max(12);
 export type Frame = z.infer<typeof frameSchema>;
+export const filesSchema = z.record(
+  idSchema,
+  z.object({
+    id: idSchema,
+    mimeType: z.enum([
+      "image/png",
+      "image/jpeg",
+      "image/webp",
+      "image/gif",
+      "image/svg+xml",
+    ]),
+    dataURL: z
+      .string()
+      .max(20 * 1024 * 1024)
+      .regex(
+        /^data:image\/(?:png|jpeg|webp|gif|svg\+xml);base64,[A-Za-z0-9+/]+={0,2}$/,
+      ),
+    created: z.number().finite().nonnegative(),
+    lastRetrieved: z.number().finite().nonnegative().optional(),
+    version: z.number().finite().optional(),
+  }),
+);
+export const canvasStateSchema = z.object({
+  viewBackgroundColor: z.string().max(80),
+});
 export const boardContentSchema = z.object({
   title: titleSchema,
   elements: elementsSchema,
   frames: framesSchema.default([]),
+  files: filesSchema.optional(),
+  appState: canvasStateSchema.optional(),
 });
 export type BoardContent = z.infer<typeof boardContentSchema>;
 export type Board = BoardContent & {
@@ -73,12 +101,27 @@ export type Board = BoardContent & {
 export const boardIdSchema = z.string().uuid();
 
 export function validateContent(input: unknown): BoardContent {
-  if (Buffer.byteLength(JSON.stringify(input), "utf8") > 2 * 1024 * 1024)
+  if (Buffer.byteLength(JSON.stringify(input), "utf8") > 20 * 1024 * 1024)
     throw new Error(
-      "Board exceeds the 2 MB limit. Split it into smaller boards.",
+      "Board exceeds the 20 MB limit. Save a local copy or use smaller images.",
     );
   const board = boardContentSchema.parse(input);
   const ids = new Set(board.elements.map((el) => el.id));
+  for (const [id, file] of Object.entries(board.files ?? {})) {
+    if (
+      file.id !== id ||
+      !file.dataURL.startsWith(`data:${file.mimeType};base64,`)
+    )
+      throw new Error("Image file metadata does not match its data");
+  }
+  for (const element of board.elements) {
+    if (
+      element.type === "image" &&
+      element.fileId &&
+      !board.files?.[String(element.fileId)]
+    )
+      throw new Error(`Image file is missing: ${element.fileId}`);
+  }
   for (const frame of board.frames)
     for (const id of frame.elementIds) {
       if (!ids.has(id))

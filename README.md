@@ -1,6 +1,6 @@
 # Whiteboard
 
-An open canvas for clear thinking. Whiteboard uses Excalidraw to turn a ChatGPT conversation into editable diagrams and visual stories.
+Plain, full-screen Excalidraw with MCP tools for ChatGPT and Codex. The editor opens directly: no landing page, branding frame, or separate edit mode.
 
 This is a **local development MVP**, not a deployed or published ChatGPT connector. It implements the MCP Apps interface; verification inside ChatGPT is still required.
 
@@ -14,7 +14,7 @@ npm run build
 npm start
 ```
 
-Open **http://127.0.0.1:3174/**. The local preview calls the real MCP tools; it does not generate responses with a separate model or require an OpenAI API key. Try the flowchart, architecture, or story examples, or open a blank canvas.
+Open **http://127.0.0.1:3174/**. The local preview calls the real MCP tools; it does not generate responses with a separate model or require an OpenAI API key. Start drawing immediately, drop or paste an image, or use the native Open menu to load an existing `.excalidraw` file.
 
 - MCP endpoint: `http://127.0.0.1:3174/mcp`
 - Health: `http://127.0.0.1:3174/health`
@@ -31,14 +31,18 @@ For development, run `npm run dev` and `npm run dev:ui` in separate terminals af
 - **Automatic diagrams:** nodes and relationships become a graph with automatic spacing and routed arrows.
 - **Visual stories:** two to eight numbered panels with named frames and previous/next navigation.
 - **Custom drawing:** Excalidraw skeleton elements for compositions that need explicit placement; partial custom drawing input can render while the host streams it.
-- **Editing:** the actual Excalidraw editor, with manual saves and revision checks to prevent silent overwrites.
-- **Exports:** SVG and editable `.excalidraw` files. No scene upload to excalidraw.com.
+- **Editing:** the native Excalidraw toolbar, undo/redo, frames, image insertion/paste/drop, and local file import. Changes autosave to the server with revision checks to prevent silent overwrites.
+- **Theme:** follows the system or MCP host; the native theme control also offers light, dark, and system.
+- **Images:** embedded file data persists with the scene and survives model refinements. The board limit is 20 MB including encoded images.
+- **Local files:** native Save to / Export image, plus `.excalidraw` and SVG download actions. Pick your laptop project/Codex folder in the browser save dialog where supported; otherwise move the downloaded file there. Files are not silently written into the mini or a guessed workspace path.
+- **Host actions:** fullscreen, model context, Discuss this board, host downloads, and optional ChatGPT file-library image import and board upload. The menu only shows actions advertised by the host.
 - **MCP Apps:** an inline canvas, host fullscreen requests, theme/safe-area handling, model context updates, and host-mediated downloads.
 
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
+| `open_board` | Open a blank or existing editor; declares sidebar and conversation entrypoints |
 | `read_me` | Drawing formats, visual guidance, and editing workflow |
 | `create_diagram` | Automatically lay out nodes and edges |
 | `create_story` | Build an ordered visual explanation |
@@ -67,7 +71,7 @@ For development, run `npm run dev` and `npm run dev:ui` in separate terminals af
 
 `create_story` takes `title` and `steps: [{title, body, tone}]`. Supported tones are blue, green, amber, rose, and neutral. For custom drawing, call `read_me` first. The low-level tool format is inspired by the official Excalidraw MCP, but this is not a drop-in replacement: use board IDs and revisions instead of upstream checkpoints, and named story frames instead of camera pseudo-elements.
 
-Boards are persisted when tools create them. Manual edits require **Save changes**. ChatGPT should read the latest board before replacing a scene. A revision conflict leaves the user's draft on the canvas; download that draft before reloading and merging it with the current saved board.
+Boards are persisted when tools create them. Manual edits autosave after a short pause; the standalone URL receives the board ID for reopening. ChatGPT should read the latest board before replacing a scene. A revision conflict leaves the user's draft on the canvas; download that draft before reloading and merging it with the current saved board.
 
 ## Connect to ChatGPT
 
@@ -105,7 +109,7 @@ npm run qa:render
 - No user accounts, OAuth, tenant ownership, collaboration, or per-user rate limiting. Board IDs are bearer capabilities, not identity checks. Keep this prototype private.
 - The file store serializes updates inside one server process. Multi-instance hosting requires transactional shared storage and authenticated authorization.
 - The current widget is roughly 8.5 MB before compression. Bundle splitting/self-hosted assets and load-time measurement remain release work.
-- Image/file imports, embedded webpages, Mermaid input, and checkpoint-compatible animation are outside this version.
+- Embedded webpages, arbitrary document rendering, native host file-viewer registration, Mermaid input, and checkpoint-compatible animation are outside this version.
 - There are remaining upstream/transitive npm audit advisories. See [verification notes](docs/verification.md); do not describe this prototype as production hardened.
 
 ## Contributing and credits

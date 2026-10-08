@@ -36,7 +36,7 @@ export function createHttpApp(
     }
     next();
   });
-  app.use(express.json({ limit: "3mb" }));
+  app.use(express.json({ limit: "24mb" }));
   app.get("/health", (_req, res) =>
     res.json({ name: "Whiteboard", status: "ok", version: "0.1.0" }),
   );

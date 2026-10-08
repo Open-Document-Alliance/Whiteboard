@@ -6,150 +6,254 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import {
   Excalidraw,
   MainMenu,
+  WelcomeScreen,
   CaptureUpdateAction,
-  exportToSvg,
   serializeAsJSON,
+  exportToSvg,
 } from "@excalidraw/excalidraw";
-import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
+import type {
+  AppState,
+  BinaryFiles,
+  ExcalidrawImperativeAPI,
+} from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { Board, Element } from "./model.js";
+import type { Board } from "./model.js";
 import { normalizeElements, parsePartialElements } from "./scene.js";
-import { examples } from "./examples.js";
 import "@excalidraw/excalidraw/index.css";
 import "./style.css";
+import { fileHost, importHostImages } from "./file-import.js";
 
 const embedded = window.self !== window.top;
-const signature = (elements: readonly ExcalidrawElement[]) =>
-  elements.map((el) => `${el.id}:${el.version}:${el.isDeleted}`).join("|");
-const mark = (
-  <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true">
-    <rect
-      x="2"
-      y="3"
-      width="24"
-      height="20"
-      rx="5"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.7"
-    />
-    <path
-      d="m7 16 5-6 3 6 6-7M10 26h8"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.7"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-  </svg>
-);
-
+type Theme = "light" | "dark";
+type ThemeChoice = Theme | "system";
+const signature = (
+  elements: readonly ExcalidrawElement[],
+  state: Pick<AppState, "viewBackgroundColor" | "name">,
+  files: BinaryFiles,
+) =>
+  JSON.stringify([
+    elements
+      .filter((el) => !el.isDeleted)
+      .map((el) => [el.id, el.version, el.versionNonce]),
+    state.viewBackgroundColor,
+    state.name,
+    Object.values(files).map((file) => [
+      file.id,
+      file.version,
+      file.dataURL.length,
+    ]),
+  ]);
+function scene(api: ExcalidrawImperativeAPI) {
+  const elements = api.getSceneElements();
+  const state = api.getAppState();
+  const ids = new Set(
+    elements.flatMap((el) =>
+      el.type === "image" && el.fileId ? [el.fileId] : [],
+    ),
+  );
+  const files = Object.fromEntries(
+    Object.entries(api.getFiles()).filter(([id]) => ids.has(id as never)),
+  );
+  return {
+    elements,
+    files,
+    appState: { viewBackgroundColor: state.viewBackgroundColor },
+    title: state.name || "Untitled whiteboard",
+  };
+}
 function WhiteboardApp() {
-  const [board, setBoard] = useState<Board | null>(null);
   const [api, setApi] = useState<ExcalidrawImperativeAPI | null>(null);
   const [ready, setReady] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [editing, setEditing] = useState(false);
-  const [dirty, setDirty] = useState(false);
   const [error, setError] = useState("");
-  const [frame, setFrame] = useState(-1);
-  const [theme, setTheme] = useState<"light" | "dark">("light");
-  const [fullscreen, setFullscreen] = useState(false);
-  const [partial, setPartial] = useState<Element[] | null>(null);
+  const [systemTheme, setSystemTheme] = useState<Theme>(() =>
+    window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light",
+  );
+  const [hostTheme, setHostTheme] = useState<Theme>();
+  const [themeChoice, setThemeChoice] = useState<ThemeChoice>(() => {
+    try {
+      const value = localStorage.getItem("whiteboard-theme");
+      return value === "light" || value === "dark" ? value : "system";
+    } catch {
+      return "system";
+    }
+  });
+  const [capabilities, setCapabilities] = useState({
+    download: false,
+    message: false,
+    fullscreen: false,
+    upload: false,
+    importImages: false,
+  });
   const host = useRef<App | null>(null);
   const local = useRef<Client | null>(null);
-  const boardRef = useRef<Board | null>(null);
+  const board = useRef<Board | null>(null);
+  const pending = useRef<Board | null>(null);
+  const dirty = useRef(false);
   const baseline = useRef("");
-  const dirtyRef = useRef(false);
-  const changing = useRef(false);
-  const contextTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const loading = useRef(true);
+  const saving = useRef<Promise<void> | null>(null);
+  const saveTimer = useRef<ReturnType<typeof setTimeout>>();
+  const saveRef = useRef<() => Promise<void>>(async () => {});
+  const apiRef = useRef(api);
+  apiRef.current = api;
+  const theme =
+    themeChoice === "system" ? (hostTheme ?? systemTheme) : themeChoice;
 
-  const accept = useCallback((result: CallToolResult) => {
-    if (result.isError)
-      throw new Error(
-        result.content
-          .filter((c) => c.type === "text")
-          .map((c) => c.text)
-          .join("\n") || "Whiteboard could not complete the request.",
-      );
-    const next = result._meta?.board as Board | undefined;
-    if (!next) return;
-    if (dirtyRef.current) {
-      setError(
-        "A new board version is available. Your unsaved edits are still here. Download a copy before reloading the saved version.",
-      );
+  const report = (e: unknown) => {
+    if ((e as Error).name !== "AbortError") setError((e as Error).message);
+  };
+  const applyBoard = useCallback((next: Board) => {
+    const canvas = apiRef.current;
+    if (!canvas) {
+      pending.current = next;
       return;
     }
-    boardRef.current = next;
-    setBoard(next);
-    setPartial(null);
-    setFrame(-1);
-    setError("");
+    const elements = normalizeElements(next.elements);
+    const appState = {
+      ...canvas.getAppState(),
+      ...next.appState,
+      name: next.title,
+    };
+    canvas.addFiles(
+      Object.values(next.files ?? {}) as unknown as Parameters<
+        typeof canvas.addFiles
+      >[0],
+    );
+    baseline.current = signature(elements, appState, canvas.getFiles());
+    dirty.current = false;
+    board.current = next;
+    canvas.updateScene({
+      elements,
+      appState,
+      captureUpdate: CaptureUpdateAction.NEVER,
+    });
+    canvas.scrollToContent(elements, {
+      fitToViewport: true,
+      viewportZoomFactor: 0.9,
+    });
     if (!embedded) window.history.replaceState(null, "", `#board=${next.id}`);
   }, []);
-  const call = useCallback(
-    async (name: string, args: Record<string, unknown>) => {
-      const result = host.current
-        ? await host.current.callServerTool({ name, arguments: args })
-        : await local.current!.callTool({ name, arguments: args });
+  const accept = useCallback(
+    (result: CallToolResult) => {
       if (result.isError)
         throw new Error(
-          (result.content as CallToolResult["content"])
+          result.content
             .filter((c) => c.type === "text")
             .map((c) => c.text)
             .join("\n"),
         );
-      return result as CallToolResult;
+      const next = result._meta?.board as Board | undefined;
+      if (!next) return;
+      if (dirty.current || saving.current) {
+        setError(
+          "A newer board is available. Your edits are still here. Save a local copy from the menu before reloading.",
+        );
+        return;
+      }
+      applyBoard(next);
+    },
+    [applyBoard],
+  );
+  const call = useCallback(
+    async (name: string, args: Record<string, unknown>) => {
+      const result = (
+        host.current
+          ? await host.current.callServerTool({ name, arguments: args })
+          : await local.current!.callTool({ name, arguments: args })
+      ) as CallToolResult;
+      if (result.isError)
+        throw new Error(
+          result.content
+            .filter((c) => c.type === "text")
+            .map((c) => c.text)
+            .join("\n"),
+        );
+      return result;
     },
     [],
   );
 
   useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const change = () => setSystemTheme(media.matches ? "dark" : "light");
+    media.addEventListener("change", change);
+    return () => media.removeEventListener("change", change);
+  }, []);
+  useEffect(() => {
     let disposed = false;
     if (embedded) {
-      const app = new App({ name: "Whiteboard", version: "0.1.0" }, {});
+      const app = new App(
+        { name: "Whiteboard", version: "0.1.0" },
+        { availableDisplayModes: ["inline", "fullscreen"] },
+      );
       host.current = app;
       app.ontoolresult = (result) => {
         if (!disposed) {
           try {
             accept(result as CallToolResult);
           } catch (e) {
-            setError((e as Error).message);
+            report(e);
           }
         }
       };
-      app.ontoolinputpartial = (input) => {
-        if (!boardRef.current)
-          setPartial(parsePartialElements(input.arguments?.elements));
-      };
       app.ontoolinput = () => {};
-      app.ontoolcancelled = () => {
-        setPartial(null);
-        setError("Drawing was cancelled.");
+      app.ontoolinputpartial = (input) => {
+        if (board.current || dirty.current || !apiRef.current) return;
+        const elements = parsePartialElements(input.arguments?.elements);
+        if (!elements.length) return;
+        try {
+          const canvas = apiRef.current;
+          const normalized = normalizeElements(elements);
+          baseline.current = signature(
+            normalized,
+            canvas.getAppState(),
+            canvas.getFiles(),
+          );
+          canvas.updateScene({
+            elements: normalized,
+            captureUpdate: CaptureUpdateAction.NEVER,
+          });
+          canvas.scrollToContent(normalized, { fitToViewport: true });
+        } catch {
+          /* Wait for the complete shape. */
+        }
       };
       app.onhostcontextchanged = (context) => {
-        if (context.theme) setTheme(context.theme);
-        if (context.displayMode)
-          setFullscreen(context.displayMode === "fullscreen");
-        const insets = context.safeAreaInsets;
-        if (insets)
-          for (const [key, value] of Object.entries(insets))
+        if (context.theme) setHostTheme(context.theme);
+        if (context.safeAreaInsets)
+          for (const [edge, value] of Object.entries(context.safeAreaInsets))
             document.documentElement.style.setProperty(
-              `--safe-${key}`,
+              `--safe-${edge}`,
               `${value}px`,
             );
       };
-      app.onteardown = async () => ({});
+      app.onteardown = async () => {
+        await saveRef.current();
+        return {};
+      };
       app
         .connect()
         .then(() => {
-          if (!disposed) {
-            setReady(true);
-            setTheme(app.getHostContext()?.theme ?? "light");
-          }
+          if (disposed) return;
+          setHostTheme(app.getHostContext()?.theme);
+          const caps = app.getHostCapabilities();
+          setCapabilities({
+            download: !!caps?.downloadFile,
+            message: !!caps?.message?.text,
+            fullscreen: !!app
+              .getHostContext()
+              ?.availableDisplayModes?.includes("fullscreen"),
+            upload: !!fileHost()?.uploadFile,
+            importImages:
+              !!fileHost()?.selectFiles && !!fileHost()?.getFileDownloadUrl,
+          });
+          loading.current = false;
+          setReady(true);
         })
-        .catch((e) => setError(e.message));
+        .catch(report);
       return () => {
         disposed = true;
         void app.close();
@@ -165,7 +269,6 @@ function WhiteboardApp() {
       )
       .then(async () => {
         if (disposed) return;
-        setReady(true);
         const id = new URLSearchParams(window.location.hash.slice(1)).get(
           "board",
         );
@@ -176,49 +279,30 @@ function WhiteboardApp() {
               arguments: { id },
             })) as CallToolResult,
           );
+        loading.current = false;
+        setReady(true);
       })
       .catch((e) => {
-        if (!disposed)
-          setError(`Could not connect to Whiteboard: ${e.message}`);
+        loading.current = false;
+        setError(
+          `Server unavailable. You can still draw and save a local file. ${e.message}`,
+        );
       });
     return () => {
       disposed = true;
       void client.close();
     };
   }, [accept]);
-
   useEffect(() => {
-    if (!api || !board) return;
-    changing.current = true;
-    try {
-      const elements = normalizeElements(board.elements);
-      baseline.current = signature(elements);
-      dirtyRef.current = false;
-      setDirty(false);
-      api.updateScene({ elements, captureUpdate: CaptureUpdateAction.NEVER });
-      api.scrollToContent(elements, {
-        fitToViewport: true,
-        viewportZoomFactor: 0.8,
-      });
-    } catch (e) {
-      setError(`Could not render this board: ${(e as Error).message}`);
-    } finally {
-      changing.current = false;
+    if (api && pending.current) {
+      const next = pending.current;
+      pending.current = null;
+      applyBoard(next);
     }
-  }, [board?.id, board?.elements, api]);
-  useEffect(() => {
-    if (!api || !partial?.length || board) return;
-    try {
-      const elements = normalizeElements(partial);
-      api.updateScene({ elements, captureUpdate: CaptureUpdateAction.NEVER });
-      api.scrollToContent(elements, { fitToViewport: true });
-    } catch {
-      /* A partial drawing may refer to a shape still being streamed. */
-    }
-  }, [partial, api, board]);
+  }, [api, applyBoard]);
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
-      if (dirtyRef.current) {
+      if (dirty.current) {
         event.preventDefault();
         event.returnValue = "";
       }
@@ -226,409 +310,268 @@ function WhiteboardApp() {
     window.addEventListener("beforeunload", warn);
     return () => {
       window.removeEventListener("beforeunload", warn);
-      if (contextTimer.current) clearTimeout(contextTimer.current);
+      clearTimeout(saveTimer.current);
     };
   }, []);
 
-  const run = async (action: () => Promise<void>) => {
-    setBusy(true);
-    setError("");
-    try {
-      await action();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-  const start = (name: string, args: Record<string, unknown>) =>
-    run(async () => {
-      accept(await call(name, args));
-    });
-  const save = () =>
-    run(async () => {
-      if (!api || !board) return;
-      const current = api.getSceneElements();
-      const sent = signature(current);
-      const result = await call("save_board", {
-        id: board.id,
-        expectedRevision: board.revision,
-        elements: current,
-      });
-      const saved = result._meta?.board as Board;
+  const save = async () => {
+    if (saving.current) return saving.current;
+    if (!api || !ready || !dirty.current) return;
+    const work = async () => {
+      const payload = scene(api);
+      const sent = signature(
+        api.getSceneElements(),
+        api.getAppState(),
+        api.getFiles(),
+      );
+      const result = board.current
+        ? await call("save_board", {
+            id: board.current.id,
+            expectedRevision: board.current.revision,
+            ...payload,
+          })
+        : await call("create_view", {
+            ...payload,
+            elements: JSON.stringify(payload.elements),
+          });
+      const saved = result._meta?.board as Board | undefined;
       if (!saved)
         throw new Error(
-          "Save was not confirmed. Your changes remain on the canvas.",
+          "Save was not confirmed. Your edits remain on the canvas.",
         );
-      boardRef.current = saved;
-      // Keep newer typing on screen if a user edits while the save is in flight.
-      if (signature(api.getSceneElements()) === sent) {
-        dirtyRef.current = false;
-        setDirty(false);
-        accept(result);
-      } else
-        setBoard((previous) =>
-          previous ? { ...previous, revision: saved.revision } : previous,
-        );
-      await host.current
-        ?.updateModelContext({
-          content: [
-            {
-              type: "text",
-              text: `User saved manual edits to board ${saved.id}, revision ${saved.revision}. Read this latest board before refining it.`,
-            },
-          ],
-        })
-        .catch(() => {});
-    });
-  const focusFrame = (index: number) => {
-    setFrame(index);
-    const elements = api?.getSceneElements() ?? [];
-    const targets =
-      index < 0
-        ? elements
-        : elements.filter((el) =>
-            board?.frames[index]?.elementIds.includes(el.id),
-          );
-    if (targets.length)
-      api?.scrollToContent(targets, {
-        fitToViewport: true,
-        viewportZoomFactor: 0.8,
-        animate: !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-        duration: 350,
-      });
-  };
-  const download = (format: "svg" | "excalidraw") =>
-    run(async () => {
-      if (!api || !board) return;
-      const name =
-        board.title
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, "-")
-          .slice(0, 70) || "whiteboard";
-      const contents =
-        format === "svg"
-          ? (
-              await exportToSvg({
-                elements: api.getSceneElements(),
-                appState: {
-                  ...api.getAppState(),
-                  exportBackground: true,
-                  viewBackgroundColor: "#ffffff",
-                },
-                files: api.getFiles(),
-              })
-            ).outerHTML
-          : serializeAsJSON(
-              api.getSceneElements(),
-              api.getAppState(),
-              api.getFiles(),
-              "local",
-            );
-      const mimeType = format === "svg" ? "image/svg+xml" : "application/json";
-      if (host.current) {
-        const result = await host.current.downloadFile({
-          contents: [
-            {
-              type: "resource",
-              resource: {
-                uri: `file:///${name}.${format}`,
-                mimeType,
-                text: contents,
+      board.current = saved;
+      baseline.current = sent;
+      dirty.current =
+        signature(api.getSceneElements(), api.getAppState(), api.getFiles()) !==
+        sent;
+      if (!embedded)
+        window.history.replaceState(null, "", `#board=${saved.id}`);
+      if (host.current?.getHostCapabilities()?.updateModelContext)
+        void host.current
+          .updateModelContext({
+            content: [
+              {
+                type: "text",
+                text: `Whiteboard ${saved.id}, revision ${saved.revision}, has the user's latest edits. Call read_board before changing it. Image files are preserved by update_board when omitted.`,
               },
+            ],
+          })
+          .catch(() => {});
+      setError("");
+    };
+    saving.current = work();
+    try {
+      await saving.current;
+    } finally {
+      saving.current = null;
+    }
+    if (dirty.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(
+        () => void saveRef.current().catch(report),
+        750,
+      );
+    }
+  };
+  saveRef.current = save;
+  const run = (action: () => Promise<unknown>) => {
+    void action().catch(report);
+  };
+  const fileContents = () => {
+    if (!api) throw new Error("Canvas is still loading.");
+    return serializeAsJSON(
+      api.getSceneElements(),
+      api.getAppState(),
+      api.getFiles(),
+      "local",
+    );
+  };
+  const download = async (format: "excalidraw" | "svg") => {
+    if (!api) return;
+    const text =
+      format === "svg"
+        ? (
+            await exportToSvg({
+              elements: api.getSceneElements(),
+              appState: api.getAppState(),
+              files: api.getFiles(),
+            })
+          ).outerHTML
+        : fileContents();
+    const mimeType =
+      format === "svg" ? "image/svg+xml" : "application/vnd.excalidraw+json";
+    const name = `${(api.getAppState().name || "whiteboard").replace(/[^a-zA-Z0-9 _-]/g, "").slice(0, 80)}.${format}`;
+    if (host.current && capabilities.download) {
+      const result = await host.current.downloadFile({
+        contents: [
+          {
+            type: "resource",
+            resource: {
+              uri: `file:///${encodeURIComponent(name)}`,
+              mimeType,
+              text,
             },
-          ],
-        });
-        if (result.isError)
-          throw new Error("The host did not complete the download.");
-      } else {
-        const url = URL.createObjectURL(
-          new Blob([contents], { type: mimeType }),
-        );
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = `${name}.${format}`;
-        link.click();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-      }
-    });
-  const expand = () =>
-    run(async () => {
-      if (!host.current) return;
-      const result = await host.current.requestDisplayMode({
-        mode: fullscreen ? "inline" : "fullscreen",
+          },
+        ],
       });
-      setFullscreen(result.mode === "fullscreen");
-    });
-  const hasCanvas = !!board || !!partial?.length;
+      if (result.isError)
+        throw new Error(
+          "The host could not save the file. Try Export image or Save to in the menu.",
+        );
+    } else {
+      const url = URL.createObjectURL(new Blob([text], { type: mimeType }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  };
   return (
-    <main
-      className={`whiteboard ${embedded ? "embedded" : "standalone"} ${fullscreen ? "fullscreen" : ""}`}
-      data-theme={theme}
-    >
-      <header className="app-header">
-        <div className="brand">
-          {mark}
-          <span>
-            whiteboard<span className="brand-dot">.</span>
-          </span>
-        </div>
-        <span className="header-note">
-          {embedded
-            ? "A little space to think"
-            : "The open canvas for clear thinking"}
-        </span>
-        <span className="connection">
-          <i className={ready ? "connected" : ""} />
-          {ready ? (embedded ? "Connected" : "Local preview") : "Connecting"}
-        </span>
-      </header>
+    <main className="whiteboard" data-theme={theme}>
+      <Excalidraw
+        excalidrawAPI={setApi}
+        theme={theme}
+        UIOptions={{ canvasActions: { toggleTheme: true } }}
+        initialData={{ appState: { name: "Untitled whiteboard" } }}
+        onChange={(elements, state, files) => {
+          if (loading.current) return;
+          const value = signature(elements, state, files);
+          if (!baseline.current && !elements.length) {
+            baseline.current = value;
+            return;
+          }
+          dirty.current = value !== baseline.current;
+          clearTimeout(saveTimer.current);
+          if (dirty.current)
+            saveTimer.current = setTimeout(
+              () => void saveRef.current().catch(report),
+              750,
+            );
+        }}
+      >
+        <WelcomeScreen>
+          <></>
+        </WelcomeScreen>
+        <MainMenu>
+          <MainMenu.DefaultItems.LoadScene />
+          <MainMenu.DefaultItems.SaveToActiveFile />
+          {capabilities.importImages && (
+            <MainMenu.Item
+              onSelect={() => api && run(() => importHostImages(api))}
+            >
+              Insert image from ChatGPT files
+            </MainMenu.Item>
+          )}
+          <MainMenu.DefaultItems.Export />
+          <MainMenu.DefaultItems.SaveAsImage />
+          <MainMenu.Item onSelect={() => run(() => download("excalidraw"))}>
+            Download .excalidraw
+          </MainMenu.Item>
+          <MainMenu.Item onSelect={() => run(() => download("svg"))}>
+            Download SVG
+          </MainMenu.Item>
+          {embedded && (
+            <MainMenu.Item
+              disabled={!ready}
+              onSelect={() =>
+                run(async () => {
+                  await save();
+                  api?.setToast({ message: "Board saved" });
+                })
+              }
+            >
+              Save board
+            </MainMenu.Item>
+          )}
+          {capabilities.upload && (
+            <MainMenu.Item
+              onSelect={() =>
+                run(async () => {
+                  await fileHost()!.uploadFile!(
+                    new File(
+                      [fileContents()],
+                      `${api?.getAppState().name || "whiteboard"}.excalidraw`,
+                      { type: "application/json" },
+                    ),
+                    { library: true },
+                  );
+                  api?.setToast({ message: "File saved to ChatGPT" });
+                })
+              }
+            >
+              Save to ChatGPT files
+            </MainMenu.Item>
+          )}
+          {capabilities.message && (
+            <MainMenu.Item
+              onSelect={() =>
+                run(async () => {
+                  await save();
+                  if (!board.current) throw new Error("Draw something first.");
+                  const result = await host.current!.sendMessage({
+                    role: "user",
+                    content: [
+                      {
+                        type: "text",
+                        text: `Help me refine Whiteboard ${board.current.id}. Read its latest revision before changing it and preserve my edits and images.`,
+                      },
+                    ],
+                  });
+                  if (result.isError)
+                    throw new Error("The host could not send the message.");
+                })
+              }
+            >
+              Discuss this board
+            </MainMenu.Item>
+          )}
+          {capabilities.fullscreen && (
+            <MainMenu.Item
+              onSelect={() =>
+                run(() =>
+                  host.current!.requestDisplayMode({
+                    mode:
+                      host.current!.getHostContext()?.displayMode ===
+                      "fullscreen"
+                        ? "inline"
+                        : "fullscreen",
+                  }),
+                )
+              }
+            >
+              Toggle fullscreen
+            </MainMenu.Item>
+          )}
+          <MainMenu.Separator />
+          <MainMenu.DefaultItems.ClearCanvas />
+          <MainMenu.DefaultItems.ToggleTheme
+            allowSystemTheme
+            theme={themeChoice}
+            onSelect={(choice) => {
+              setThemeChoice(choice);
+              try {
+                localStorage.setItem("whiteboard-theme", choice);
+              } catch {
+                /* Private iframe storage may be unavailable. */
+              }
+            }}
+          />
+          <MainMenu.DefaultItems.ChangeCanvasBackground />
+          <MainMenu.DefaultItems.Help />
+        </MainMenu>
+      </Excalidraw>
       {error && (
         <div className="notice" role="alert">
-          {error}
+          <span>{error}</span>
+          <button onClick={() => run(() => download("excalidraw"))}>
+            Save a copy
+          </button>
           <button onClick={() => setError("")} aria-label="Dismiss error">
             ×
           </button>
         </div>
       )}
-      {!hasCanvas ? (
-        <section className="welcome">
-          <div className="eyebrow">IDEAS LOOK BETTER OUT HERE</div>
-          <h1>
-            A little less explaining.
-            <br />
-            <em>A little more seeing.</em>
-          </h1>
-          <p>
-            Turn a tangled thought into a clear diagram.
-            <br />
-            Give a good story room to unfold.
-          </p>
-          {!embedded ? (
-            <>
-              <div className="starter-heading">
-                <span>Start with a spark</span>
-                <button
-                  className="text-button"
-                  disabled={!ready || busy}
-                  onClick={() =>
-                    start("create_view", {
-                      title: "Untitled whiteboard",
-                      elements: "[]",
-                    }).then(() => setEditing(true))
-                  }
-                >
-                  Or a blank canvas ↗
-                </button>
-              </div>
-              <div className="starters">
-                {examples.map((example, i) => (
-                  <button
-                    className={`starter starter-${i}`}
-                    key={example.name}
-                    disabled={!ready || busy}
-                    onClick={() => start(example.tool, example.args)}
-                  >
-                    <span className="starter-kind">{example.kind}</span>
-                    <span className="mini-diagram" aria-hidden="true">
-                      {i === 1
-                        ? "01 — 02 — 03"
-                        : i === 2
-                          ? "○ ─ ◇ ─ □"
-                          : "□ ⟶ □ ⟶ □"}
-                    </span>
-                    <strong>
-                      {example.name}
-                      <span>↗</span>
-                    </strong>
-                    <span className="starter-description">
-                      {example.description}
-                    </span>
-                  </button>
-                ))}
-              </div>
-              <p className="welcome-footnote">
-                These examples use the real Whiteboard tools.
-                <br />
-                Connect Whiteboard to ChatGPT to draw from a conversation.
-              </p>
-            </>
-          ) : (
-            <p className="welcome-footnote">
-              Your diagram will appear here when it is ready.
-            </p>
-          )}
-        </section>
-      ) : (
-        <section className="workspace">
-          <div className="board-toolbar">
-            <div className="board-heading">
-              <span className="eyebrow">
-                {board?.frames.length ? "VISUAL STORY" : "ON THE CANVAS"}
-              </span>
-              <h1>{board?.title ?? "Drawing your idea…"}</h1>
-            </div>
-            <div className="board-actions">
-              <span className="save-state" role="status">
-                {dirty
-                  ? "Unsaved changes"
-                  : board
-                    ? `Saved · v${board.revision}`
-                    : "Drawing…"}
-              </span>
-              <button disabled={busy || !board} onClick={() => focusFrame(-1)}>
-                Fit
-              </button>
-              <button
-                disabled={busy || !board}
-                aria-pressed={editing}
-                onClick={() => setEditing(!editing)}
-              >
-                {editing ? "Done editing" : "Edit"}
-              </button>
-              {dirty && (
-                <button className="primary" disabled={busy} onClick={save}>
-                  Save changes
-                </button>
-              )}
-              <details className="export-menu">
-                <summary>Download ↓</summary>
-                <div>
-                  <button
-                    disabled={busy || !board}
-                    onClick={() => download("svg")}
-                  >
-                    SVG image
-                  </button>
-                  <button
-                    disabled={busy || !board}
-                    onClick={() => download("excalidraw")}
-                  >
-                    Editable file
-                  </button>
-                </div>
-              </details>
-              {embedded && (
-                <button disabled={busy} onClick={expand}>
-                  {fullscreen ? "Collapse ↙" : "Expand ↗"}
-                </button>
-              )}
-            </div>
-          </div>
-          <div className="canvas" aria-label="Whiteboard drawing canvas">
-            <Excalidraw
-              excalidrawAPI={(value) => {
-                setApi(value);
-              }}
-              theme={theme}
-              viewModeEnabled={!editing}
-              zenModeEnabled={!editing}
-              initialData={{
-                appState: {
-                  viewBackgroundColor: "#ffffff",
-                  currentItemFontFamily: 2,
-                },
-              }}
-              UIOptions={{
-                tools: { image: false },
-                canvasActions: {
-                  loadScene: false,
-                  export: false,
-                  saveAsImage: false,
-                  toggleTheme: false,
-                },
-              }}
-              onChange={(elements) => {
-                if (changing.current || !boardRef.current || !editing) return;
-                const changed = signature(elements) !== baseline.current;
-                dirtyRef.current = changed;
-                setDirty(changed);
-                if (changed && host.current) {
-                  if (contextTimer.current) clearTimeout(contextTimer.current);
-                  contextTimer.current = setTimeout(() => {
-                    if (!dirtyRef.current) return;
-                    void host.current
-                      ?.updateModelContext({
-                        content: [
-                          {
-                            type: "text",
-                            text: `The user has unsaved manual edits on board ${boardRef.current?.id}. Ask them to save changes before changing this board.`,
-                          },
-                        ],
-                      })
-                      .catch(() => {});
-                  }, 500);
-                }
-              }}
-            >
-              <MainMenu>
-                <MainMenu.DefaultItems.ClearCanvas />
-                <MainMenu.DefaultItems.ChangeCanvasBackground />
-                <MainMenu.Item onSelect={() => download("excalidraw")}>
-                  Download editable file
-                </MainMenu.Item>
-              </MainMenu>
-            </Excalidraw>
-          </div>
-          {board && board.frames.length > 0 && (
-            <nav className="story-controls" aria-label="Story frames">
-              <button
-                aria-label="Previous frame"
-                disabled={frame < 0}
-                onClick={() => focusFrame(frame - 1)}
-              >
-                ←
-              </button>
-              <div className="story-caption">
-                <span>
-                  {frame < 0
-                    ? "THE WHOLE STORY"
-                    : `${String(frame + 1).padStart(2, "0")} / ${String(board.frames.length).padStart(2, "0")}`}
-                </span>
-                <strong>
-                  {frame < 0
-                    ? "Every beginning leads somewhere."
-                    : board.frames[frame]?.title}
-                </strong>
-                {frame >= 0 && <p>{board.frames[frame]?.caption}</p>}
-              </div>
-              <button
-                aria-label="Next frame"
-                disabled={frame >= board.frames.length - 1}
-                onClick={() => focusFrame(frame + 1)}
-              >
-                →
-              </button>
-            </nav>
-          )}
-          <div className="workspace-footer">
-            <span>
-              {editing
-                ? "Make it yours. Save your changes when you’re ready."
-                : "Scroll to explore. Edit to make it yours."}
-            </span>
-            {!embedded && (
-              <button
-                disabled={dirty || busy}
-                className="text-button"
-                onClick={() => {
-                  setBoard(null);
-                  boardRef.current = null;
-                  setPartial(null);
-                  setEditing(false);
-                  window.history.replaceState(null, "", "/");
-                }}
-              >
-                Start another board ↗
-              </button>
-            )}
-          </div>
-        </section>
-      )}
-      <footer className="app-footer">
-        <span>OPEN DOCUMENT ALLIANCE</span>
-        <span>Built with Excalidraw · MIT</span>
-      </footer>
     </main>
   );
 }

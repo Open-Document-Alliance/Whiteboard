@@ -14,6 +14,8 @@ import {
   elementsSchema,
   framesSchema,
   titleSchema,
+  filesSchema,
+  canvasStateSchema,
   type Board,
   type Element,
 } from "./model.js";
@@ -31,7 +33,7 @@ Choose create_story for explanations, journeys, timelines, before/after narrativ
 Choose create_view for custom visual compositions. It accepts a JSON array string of Excalidraw skeletons, following the excalidraw/excalidraw-mcp convention. Supported types: rectangle, ellipse, diamond, text, arrow, line, freedraw. Each needs unique id, type, x, y; shapes need width/height. Text needs text/fontSize. Lines need points [[dx,dy],...]. Labels: {text,fontSize:20,fontFamily:2}. Arrow connections: start:{id:'source'}, end:{id:'target'}, endArrowhead:'arrow'. Use backgroundColor, strokeColor, fillStyle:'solid', roughness:0.7. Camera pseudo-elements/checkpoints are not supported here; use optional named frames with elementIds instead.
 Example: [{"id":"idea","type":"rectangle","x":60,"y":80,"width":220,"height":100,"backgroundColor":"#e2eff5","label":{"text":"An idea","fontSize":20}}]
 Visual craft: establish a clear reading order, generous whitespace, dark readable text, 18–24px labels, and at most 3 semantic colors. Blue=input, green=outcome, amber=decision, rose=problem. Favor explanation over decoration. Never invent factual claims to fill a diagram.
-Refinement: read_board FIRST to obtain the latest revision and user's edits. Then update_board with the complete revised elements and expectedRevision. A conflict means read again and merge, never overwrite blindly. Keep stable IDs. Frames must reference existing element IDs. The widget lets users save manual edits, download SVG or .excalidraw, and present stories.
+Refinement: read_board FIRST to obtain the latest revision and user's edits. Then update_board with the complete revised elements and expectedRevision. A conflict means read again and merge, never overwrite blindly. Keep stable IDs. Frames must reference existing element IDs. The widget opens directly into the native Excalidraw editor and autosaves manual edits, including image files and canvas backgrounds. It supports local .excalidraw/PNG/SVG exports. read_board omits image bytes from model-visible content; update_board preserves stored image files when files is omitted. Do not replace files with metadata-only entries.
 Boards are stored locally by this server. Board IDs are secret bearer capabilities. Do not claim a board is publicly shared or that a diagram has rendered before the client has displayed it.`;
 
 export function boardResult(board: Board): CallToolResult {
@@ -95,6 +97,32 @@ export function createServer(
     idempotentHint: false,
     openWorldHint: false,
   };
+  registerAppTool(
+    server,
+    "open_board",
+    {
+      title: "Open Whiteboard",
+      description:
+        "Open the Excalidraw editor. Pass a board ID to resume it, or omit it for a new blank board.",
+      inputSchema: { id: boardIdSchema.optional() },
+      annotations: writeHints,
+      _meta: {
+        ...ui,
+        "openai/ui": { entrypoints: [{ type: "global" }, { type: "thread" }] },
+      },
+    },
+    protect(async ({ id }) =>
+      boardResult(
+        id
+          ? await store.read(id)
+          : await store.create({
+              title: "Untitled whiteboard",
+              elements: [],
+              frames: [],
+            }),
+      ),
+    ),
+  );
   server.registerTool(
     "read_me",
     {
@@ -147,16 +175,20 @@ export function createServer(
         title: titleSchema,
         elements: z.string().max(2 * 1024 * 1024),
         frames: framesSchema.default([]),
+        files: filesSchema.optional(),
+        appState: canvasStateSchema.optional(),
       },
       annotations: writeHints,
       _meta: ui,
     },
-    protect(async ({ title, elements, frames }) =>
+    protect(async ({ title, elements, frames, files, appState }) =>
       boardResult(
         await store.create({
           title,
           elements: elementsSchema.parse(JSON.parse(elements)),
           frames,
+          files,
+          appState,
         }),
       ),
     ),
@@ -176,7 +208,19 @@ export function createServer(
       const board = await store.read(id);
       return {
         ...boardResult(board),
-        content: [{ type: "text", text: JSON.stringify(board) }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              ...board,
+              files: Object.fromEntries(
+                Object.entries(board.files ?? {}).map(
+                  ([id, { dataURL: _, ...metadata }]) => [id, metadata],
+                ),
+              ),
+            }),
+          },
+        ],
       };
     }),
   );
@@ -193,18 +237,31 @@ export function createServer(
         title: titleSchema.optional(),
         elements: elementsSchema,
         frames: framesSchema.optional(),
+        files: filesSchema.optional(),
+        appState: canvasStateSchema.optional(),
       },
       annotations: { ...writeHints, destructiveHint: true },
       _meta: ui,
     },
-    protect(async ({ id, expectedRevision, title, elements, frames }) =>
-      boardResult(
-        await store.update(id, expectedRevision, (current) => ({
-          title: title ?? current.title,
-          elements,
-          frames: frames ?? current.frames,
-        })),
-      ),
+    protect(
+      async ({
+        id,
+        expectedRevision,
+        title,
+        elements,
+        frames,
+        files,
+        appState,
+      }) =>
+        boardResult(
+          await store.update(id, expectedRevision, (current) => ({
+            title: title ?? current.title,
+            elements,
+            frames: frames ?? current.frames,
+            files: files ?? current.files,
+            appState: appState ?? current.appState,
+          })),
+        ),
     ),
   );
   registerAppTool(
@@ -217,26 +274,33 @@ export function createServer(
         id: boardIdSchema,
         expectedRevision: z.number().int().positive(),
         elements: elementsSchema,
+        files: filesSchema.optional(),
+        appState: canvasStateSchema.optional(),
+        title: titleSchema.optional(),
       },
       annotations: { ...writeHints, destructiveHint: true },
       _meta: { ui: { visibility: ["app"] } },
     },
-    protect(async ({ id, expectedRevision, elements }) =>
-      boardResult(
-        await store.update(id, expectedRevision, (current) => {
-          const ids = new Set(elements.map((el: Element) => el.id));
-          return {
-            ...current,
-            elements,
-            frames: current.frames
-              .map((frame) => ({
-                ...frame,
-                elementIds: frame.elementIds.filter((id) => ids.has(id)),
-              }))
-              .filter((frame) => frame.elementIds.length > 0),
-          };
-        }),
-      ),
+    protect(
+      async ({ id, expectedRevision, elements, files, appState, title }) =>
+        boardResult(
+          await store.update(id, expectedRevision, (current) => {
+            const ids = new Set(elements.map((el: Element) => el.id));
+            return {
+              ...current,
+              elements,
+              files: files ?? current.files,
+              appState: appState ?? current.appState,
+              title: title ?? current.title,
+              frames: current.frames
+                .map((frame) => ({
+                  ...frame,
+                  elementIds: frame.elementIds.filter((id) => ids.has(id)),
+                }))
+                .filter((frame) => frame.elementIds.length > 0),
+            };
+          }),
+        ),
     ),
   );
   registerAppResource(
@@ -254,10 +318,13 @@ export function createServer(
           ).replaceAll("__WHITEBOARD_ORIGIN__", options.publicOrigin),
           _meta: {
             ui: {
-              prefersBorder: true,
+              prefersBorder: false,
               csp: {
                 resourceDomains: [options.publicOrigin],
-                connectDomains: [],
+                connectDomains: [
+                  "https://files.oaiusercontent.com",
+                  "https://*.oaiusercontent.com",
+                ],
               },
             },
             "openai/widgetDescription":

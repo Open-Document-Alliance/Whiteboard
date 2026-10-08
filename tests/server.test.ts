@@ -37,6 +37,7 @@ test("MCP create, read, manual save, model refinement, and conflict protection",
     "create_diagram",
     "create_story",
     "create_view",
+    "open_board",
     "read_board",
     "read_me",
     "save_board",
@@ -227,4 +228,82 @@ test("HTTP MCP transport works and blocks foreign origins and hostnames", async 
     },
   });
   assert.equal((result._meta?.board as Board).frames.length, 2);
+});
+
+test("image files and native frames survive save, model refinement, and reopening", async (t) => {
+  const { client, store } = await setup(t);
+  const opened = await client.callTool({ name: "open_board", arguments: {} });
+  const board = opened._meta?.board as Board;
+  const files = {
+    picture: {
+      id: "picture",
+      mimeType: "image/png",
+      dataURL:
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=",
+      created: 1,
+    },
+  };
+  const elements = [
+    {
+      id: "image",
+      type: "image",
+      fileId: "picture",
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 100,
+    },
+    { id: "frame", type: "frame", x: -10, y: -10, width: 120, height: 120 },
+  ];
+  const saved = await client.callTool({
+    name: "save_board",
+    arguments: {
+      id: board.id,
+      expectedRevision: 1,
+      elements,
+      files,
+      appState: { viewBackgroundColor: "#fffce8" },
+    },
+  });
+  assert.equal(saved.isError, undefined, JSON.stringify(saved.content));
+  const refined = await client.callTool({
+    name: "update_board",
+    arguments: {
+      id: board.id,
+      expectedRevision: 2,
+      elements,
+      title: "With an image",
+    },
+  });
+  assert.equal(refined.isError, undefined);
+  const reopened = await new BoardStore(store.directory).read(board.id);
+  assert.deepEqual(reopened.files, files);
+  assert.equal(reopened.appState?.viewBackgroundColor, "#fffce8");
+  const read = await client.callTool({
+    name: "read_board",
+    arguments: { id: board.id },
+  });
+  assert.doesNotMatch(JSON.stringify(read.content), /base64/);
+  assert.deepEqual((read._meta?.board as Board).files, files);
+  const missing = await client.callTool({
+    name: "save_board",
+    arguments: { id: board.id, expectedRevision: 3, elements, files: {} },
+  });
+  assert.equal(missing.isError, true);
+  const remote = await client.callTool({
+    name: "save_board",
+    arguments: {
+      id: board.id,
+      expectedRevision: 3,
+      elements,
+      files: {
+        picture: {
+          ...files.picture,
+          dataURL: "https://unrelated.example/image.png",
+        },
+      },
+    },
+  });
+  assert.equal(remote.isError, true);
+  assert.equal((await store.read(board.id)).revision, 3);
 });
