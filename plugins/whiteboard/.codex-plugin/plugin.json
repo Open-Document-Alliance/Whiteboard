@@ -1,0 +1,34 @@
+{
+  "name": "whiteboard",
+  "version": "0.1.0",
+  "description": "Plain Excalidraw with tools for diagrams and visual stories.",
+  "author": {
+    "name": "Open Document Alliance"
+  },
+  "repository": "https://github.com/Open-Document-Alliance/Whiteboard",
+  "license": "MIT",
+  "keywords": [
+    "whiteboard",
+    "excalidraw",
+    "diagrams",
+    "storytelling"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Whiteboard",
+    "shortDescription": "Draw and edit diagrams on a plain Excalidraw canvas.",
+    "longDescription": "Create diagrams, visual stories, and editable Excalidraw boards. Uses the private Whiteboard service at 127.0.0.1:3174 on the Codex host.",
+    "developerName": "Open Document Alliance",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Draw a simple three-step process in Whiteboard.",
+      "Open a blank Whiteboard.",
+      "Turn this explanation into a visual story."
+    ]
+  }
+}
